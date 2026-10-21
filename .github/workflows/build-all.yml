@@ -1,0 +1,100 @@
+name: Build all platforms
+
+# Every push to main builds Android, Android TV, Windows and macOS apps
+# and publishes them as the latest GitHub Release (read by the Downloads page).
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  APP_URL: https://your-home1.lovable.app/app
+  APP_ID: com.baytak.yourhome
+  APP_NAME: Your Home
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        variant: [mobile, tv]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: 21 }
+      - name: Create Capacitor shell
+        run: |
+          mkdir shell && cd shell
+          npm init -y
+          npm i @capacitor/core@6 @capacitor/cli@6 @capacitor/android@6
+          mkdir www && curl -fsSL https://your-home1.lovable.app/icon-512.png -o www/icon-512.png && echo '<meta http-equiv="refresh" content="0;url=${{ env.APP_URL }}">' > www/index.html
+          cat > capacitor.config.json <<EOF
+          { "appId": "${{ env.APP_ID }}${{ matrix.variant == 'tv' && '.tv' || '' }}", "appName": "${{ env.APP_NAME }}",
+            "webDir": "www", "server": { "url": "${{ env.APP_URL }}", "cleartext": false } }
+          EOF
+          npx cap add android
+      - name: Android TV launcher
+        if: matrix.variant == 'tv'
+        working-directory: shell/android/app/src/main
+        run: |
+          sed -i 's#<category android:name="android.intent.category.LAUNCHER" />#<category android:name="android.intent.category.LAUNCHER" /><category android:name="android.intent.category.LEANBACK_LAUNCHER" />#' AndroidManifest.xml
+          sed -i 's#<application#<uses-feature android:name="android.software.leanback" android:required="false" /><uses-feature android:name="android.hardware.touchscreen" android:required="false" /><application android:banner="@mipmap/ic_launcher"#' AndroidManifest.xml
+      - name: Build APK
+        working-directory: shell/android
+        run: ./gradlew assembleDebug
+      - run: mv shell/android/app/build/outputs/apk/debug/app-debug.apk your-home-${{ matrix.variant }}.apk
+      - uses: actions/upload-artifact@v4
+        with: { name: apk-${{ matrix.variant }}, path: "*.apk" }
+
+  desktop:
+    strategy:
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - name: Create Electron shell
+        shell: bash
+        run: |
+          mkdir desktop && curl -fsSL https://your-home1.lovable.app/icon-512.png -o desktop/icon.png && cd desktop
+          cat > package.json <<EOF
+          { "name": "your-home", "productName": "${{ env.APP_NAME }}", "version": "1.0.${{ github.run_number }}", "main": "main.js",
+            "build": { "appId": "${{ env.APP_ID }}", "icon": "icon.png", "artifactName": "your-home-\${os}.\${ext}",
+              "win": { "target": "nsis" }, "mac": { "target": "dmg", "identity": null } } }
+          EOF
+          cat > main.js <<'EOF'
+          const { app, BrowserWindow } = require("electron");
+          app.whenReady().then(() => {
+            const w = new BrowserWindow({ width: 1200, height: 800, autoHideMenuBar: true });
+            w.loadURL(process.env.APP_URL || "https://your-home1.lovable.app/app");
+          });
+          app.on("window-all-closed", () => app.quit());
+          EOF
+          npm i -D electron@31 electron-builder@24
+          npx electron-builder --publish never
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-${{ matrix.os }}
+          path: |
+            desktop/dist/*.exe
+            desktop/dist/*.dmg
+
+  release:
+    needs: [android, desktop]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { path: files, merge-multiple: true }
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.${{ github.run_number }}
+          name: Your Home v1.0.${{ github.run_number }}
+          make_latest: true
+          files: files/*
